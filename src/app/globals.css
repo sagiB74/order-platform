@@ -1,0 +1,59 @@
+@import "tailwindcss";
+
+/* Commit to the light, cream design: make `dark:` opt-in via a `.dark` class
+   only, so the app never flips to a dark theme based on the visitor's OS (which
+   would clash with the cream background image). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  /* Brand palette — sampled from Hila's assets (cream ground + warm brown). */
+  --color-ground: #f6efdd;
+  --color-surface: #fffdf7;
+  --color-surface-2: #f3e8cf;
+  --color-ink: #4a3527;
+  --color-ink-soft: #8b7355;
+  --color-accent: #8b6b52;
+  --color-accent-strong: #6e4e3a;
+  --color-cream: #f4e6c4;
+  --color-border: #e6d6b8;
+  --color-success: #4f8a5b;
+  --color-danger: #b3503f;
+
+  --radius-xl: 1.1rem;
+
+  --font-sans: var(--font-assistant), "Assistant", system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+}
+
+/* Global cream canvas with the bakery-doodle background, behind everything. */
+body {
+  background-color: var(--color-ground);
+  background-image: url("/hila-backround.png");
+  background-size: cover;
+  background-position: center top;
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+}
+
+/* Owner dashboard scope — a deliberate second palette (blue, "tool" identity)
+   layered on the SAME token names the storefront uses. Because these are
+   plain CSS custom properties, this is just a cascade override: anything
+   rendered under `.dashboard-scope` (including the shared Button/Modal
+   components, unmodified) automatically resolves bg-accent/text-ink/etc to
+   these values instead of the cream/brown ones — same mechanism as the `dark:`
+   variant above, just always-on for this subtree rather than OS-gated. The
+   storefront never has this class in its ancestry, so it's unaffected. */
+.dashboard-scope {
+  --color-ground: #f8fafc;
+  --color-surface: #ffffff;
+  --color-surface-2: #eff4fb;
+  --color-ink: #0f172a;
+  --color-ink-soft: #64748b;
+  --color-accent: #2563eb;
+  --color-accent-strong: #1d4ed8;
+  --color-border: #e2e8f0;
+  --color-success: #059669;
+  --color-danger: #dc2626;
+}

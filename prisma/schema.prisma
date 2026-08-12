@@ -1,0 +1,204 @@
+// Prisma schema — the single source of truth for our database structure.
+// We grow this file ONE phase at a time. Right now it contains only the
+// "tenant spine": Business (the tenant) and User (who logs in).
+//
+// Multi-tenancy rule of thumb: every business-owned table carries a
+// `businessId` foreign key. The ONLY rows without one belong to the
+// platform itself (e.g. a SUPER_ADMIN user, whose businessId is null).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  // Prisma 7: no `url` here. The migration CLI reads it from prisma.config.ts,
+  // and the runtime client connects via a driver adapter (see src/lib/db.ts).
+}
+
+// Platform-wide roles. A user is EITHER a platform super-admin (no business)
+// or a business owner (bound to exactly one business).
+enum Role {
+  SUPER_ADMIN
+  BUSINESS_OWNER
+}
+
+enum BusinessStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+// A product's stock state. UNLIMITED = always orderable (the old default).
+// OUT_OF_STOCK = not orderable — reached either by the owner directly, or
+// automatically once a LIMITED run sells out. LIMITED = a time-boxed run: a
+// max quantity within N days from when it was set; auto-flips to
+// OUT_OF_STOCK when the count is reached, and lazily reverts to UNLIMITED
+// once the window expires (checked on every listProducts read — no cron).
+enum InventoryMode {
+  UNLIMITED
+  OUT_OF_STOCK
+  LIMITED
+}
+
+// An order's lifecycle. PENDING = awaiting the owner's approval before it's on
+// the schedule at all (today: sourced from seeded demo data standing in for a
+// future real storefront-checkout intake queue — see Order.status default,
+// which is still OPEN for the owner's own manual "Add order" entries, since
+// those don't need self-approval). OPEN = on the schedule, still to handle.
+// DONE = finished; stays on the schedule (shown greyed), never deleted. We can
+// expand this into a fuller pipeline (Payment Confirmed / In Preparation /
+// Ready…) later by simply adding enum values.
+enum OrderStatus {
+  PENDING
+  OPEN
+  DONE
+}
+
+// A tenant. One row per small business on the platform.
+model Business {
+  id       String         @id @default(cuid())
+  slug     String         @unique // the public URL segment: /[slug]
+  name     String
+  status   BusinessStatus @default(ACTIVE)
+  branding Json           @default("{}") // logo url, colors — loose for now
+  timezone String         @default("Asia/Jerusalem")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users      User[]
+  categories Category[]
+  products   Product[]
+  orders     Order[]
+  orderItems OrderItem[]
+
+  @@map("businesses")
+}
+
+// Someone who can authenticate. Customers do NOT have User rows in the MVP —
+// they order as guests. Only platform admins and business owners log in.
+model User {
+  id           String @id @default(cuid())
+  email        String @unique // login identity, globally unique across the platform
+  passwordHash String
+  role         Role
+
+  // Null for SUPER_ADMIN; set for BUSINESS_OWNER. This is the column that
+  // ties a user to their tenant and drives all isolation checks.
+  businessId String?
+  business   Business? @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId])
+  @@map("users")
+}
+
+// A way for an owner to GROUP their products (e.g. "Breads", "Cakes",
+// "Cookies") so both her dashboard and the future storefront stay organized.
+// Business-owned, so it carries businessId like every tenant table.
+model Category {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  name      String
+  sortOrder Int      @default(0) // lets the owner control display order later
+
+  products Product[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([businessId])
+  @@map("categories")
+}
+
+// A single thing the business sells. Price is stored as an INTEGER number of
+// agorot/cents (never a float) to avoid rounding bugs with money.
+model Product {
+  id         String @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  // Optional grouping. If the category is deleted, the product survives
+  // uncategorized (SetNull) rather than being deleted with it.
+  categoryId String?
+  category   Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  name        String
+  description String? // short blurb shown on the storefront
+  priceCents  Int // e.g. 4500 == ₪45.00
+  imageUrl    String? // filled in later; storefront shows a placeholder if null
+  sortOrder   Int     @default(0)
+
+  // Inventory state machine (replaces the old plain `isAvailable` boolean —
+  // catalog service still returns a derived `isAvailable` for read consumers
+  // like the storefront, so nothing downstream needed to change).
+  inventoryMode    InventoryMode @default(UNLIMITED)
+  limitMaxQuantity Int? // set only while LIMITED
+  limitSoldCount   Int           @default(0) // reset to 0 each time a new limit is set
+  limitExpiresAt   DateTime? // set only while LIMITED; "days from today" at set-time
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orderItems OrderItem[]
+
+  @@index([businessId])
+  @@index([categoryId])
+  @@map("products")
+}
+
+// A single customer order. For now these are created MANUALLY by the owner from
+// WhatsApp/phone orders; later the public storefront will create the same rows.
+model Order {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  customerName  String
+  customerPhone String
+  // Date AND time of pickup. This single field places the order on the
+  // schedule. Stored in UTC; we format it in the business's timezone for display.
+  pickupAt DateTime
+  status   OrderStatus @default(OPEN)
+  notes    String? // allergies / special requests
+
+  items OrderItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // The schedule asks "orders for this business between date X and Y", so we
+  // index exactly that pair for fast range queries.
+  @@index([businessId, pickupAt])
+  @@map("orders")
+}
+
+// One line of an order: "3 × Challah". We SNAPSHOT the product's name and price
+// at order time (nameSnapshot / priceCentsSnapshot). WHY: if the owner later
+// renames a product, changes its price, or deletes it, historical orders and
+// their totals must stay exactly as they were placed. productId is kept only as
+// a soft link (SetNull on delete) for convenience.
+model OrderItem {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  productId String?
+  product   Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  nameSnapshot       String
+  priceCentsSnapshot Int
+  quantity           Int
+
+  @@index([orderId])
+  @@index([businessId])
+  @@map("order_items")
+}
