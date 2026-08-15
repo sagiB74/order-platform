@@ -29,6 +29,17 @@ The current phase-by-phase status and "where we left off" lives in **@PROGRESS.m
   server-side ONLY (session for dashboard/admin, slug for storefront) — never trust a client
   `businessId`. Every service function takes a `TenantContext` and checks it
   (`assertCanAccessBusiness` in `src/modules/tenant/context.ts`).
+- **Storefront design is per-business, not owner-customizable.** Each business gets a dedicated,
+  dev-built storefront UI (not a shared template the owner styles via the dashboard). `src/app/
+  [slug]/page.tsx` is a thin dispatcher: it fetches tenant-scoped data via `getStorefront(slug)`
+  (the ONE data path — never duplicate DB queries per business), then renders whichever template
+  `src/storefronts/registry.ts` maps that slug to. A business's own folder under `src/storefronts/
+  <name>/` owns only presentation (hero, layout) and receives data as props; it never queries the
+  DB itself. Cart/checkout (`src/components/cart/*`) and the generic product grid
+  (`src/components/storefront/*`) are genuinely shared and must NOT be forked per business — only
+  duplicate a piece into a business's own folder if it's actually bespoke to them (see `src/
+  storefronts/hila/hero.tsx` vs `src/storefronts/default/hero.tsx`). New business with no custom
+  design yet → don't add it to the registry, it falls back to `DefaultStorefront` automatically.
 - Money in integer cents; snapshot prices onto order_items.
 
 ## Working style with this user

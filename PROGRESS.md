@@ -252,6 +252,45 @@ Hila saw the storefront pilot today; a few small follow-ups came out of that, al
   `/test` page and confirmed the rendered HTML/classes match (no headless browser available in this
   environment to check pixel-level rendering, per the existing note above about the stats chart).
 
+## Storefront templating refactor (2026-08-15)
+Decided the storefront's design direction: businesses do **not** self-customize their storefront
+via the dashboard. Instead each business gets a **dedicated, dev-built storefront UI**, plugged
+into the shared backend/DB/cart/checkout. `src/app/[slug]/page.tsx` was refactored from a page
+that always rendered one hardcoded design into a thin **dispatcher**:
+`getStorefront(slug)` (unchanged — still the one tenant-guarded data path) → `resolveStorefront(slug)`
+→ render whichever template component that returns.
+- New `src/storefronts/registry.ts`: a plain `Record<slug, StorefrontComponent>` map (**Option 1**
+  — keyed directly by slug, no schema change) + a `resolveStorefront()` helper that falls back to
+  `DefaultStorefront` for any slug not listed, so a business without a custom build yet renders a
+  plain generic storefront instead of 404ing. Promote to a `Business.storefrontTemplate` DB column
+  later if slugs ever need to change independently of which design is assigned, or if this needs
+  to be editable from `/admin`.
+- New `src/storefronts/hila/`: Hila's real pilot design, moved as-is out of `src/app/[slug]/`.
+  `hero.tsx` (the video hero) is genuinely hers — hardcoded `/hero.mp4` + slogan text — so it
+  stays business-specific. `index.tsx` composes her hero with the shared cart/catalog (below).
+- New `src/storefronts/default/`: fallback template for any future business with no custom design
+  yet. `hero.tsx` is deliberately plain (business name + optional `branding.heroTagline` on a
+  token-colored panel, no hardcoded imagery) since a business with no dedicated build also has no
+  bespoke assets to put there.
+- `product-catalog.tsx` + `product-modal.tsx` moved to **`src/components/storefront/`** (not
+  duplicated per business) — nothing about the product grid/qty-modal is Hila-specific, so it's
+  shared across every template the same way `CartProvider`/`CartBar` already were. The rule going
+  forward: only fork a piece into a business's own `src/storefronts/<name>/` folder if it's
+  actually bespoke to them; genuinely generic pieces stay shared so Phase 5 checkout logic (and
+  anything else built once) benefits every business's storefront automatically.
+- Every template component takes one prop — `{ storefront: Storefront }`, the exact shape
+  `getStorefront` returns — and does no DB access of its own; `page.tsx` is the only place that
+  calls `getStorefront`. This is what keeps tenant isolation centralized as more businesses (and
+  more bespoke designs) get added, instead of re-implementing the lookup per business.
+- Registered: `test` (Hila's demo business slug) → `HilaStorefront`. Adding a new business's custom
+  design later = new folder under `src/storefronts/`, one new line in `registry.ts` — no changes to
+  `page.tsx`, the DB layer, or any other business's folder.
+- Pure refactor, no behavior change: verified `typecheck`/`build`/`npm test` (26/26) all clean, and
+  hit the live dev server — `/test` still 200s and still serves `hero.mp4` (now via the registry
+  path instead of a hardcoded import), and an unregistered/nonexistent slug still 404s correctly.
+- Architecture rule captured in `CLAUDE.md` under "Architecture rules" so future sessions don't
+  regress to hardcoding one design into `page.tsx`.
+
 ## Data model so far (`prisma/schema.prisma`)
 - `Business` (slug, name, status, branding, timezone) and `User` (email, passwordHash, role,
   businessId?). Enums: `Role` (SUPER_ADMIN | BUSINESS_OWNER), `BusinessStatus`.

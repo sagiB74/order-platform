@@ -34,7 +34,30 @@ Full detail + rationale lives in `PROGRESS.md` (Phase C section) and the plan fi
 - `/login` and `/admin` (super-admin) screens — the spec was only the post-login owner panel.
 - Real site-visit analytics + storefront checkout→Order submission (Phase 5 / Phase 7).
 
+## Done — Storefront templating refactor (2026-08-15)
+- [x] Decided design direction: businesses get a **dedicated, dev-built** storefront (not
+      owner-customizable via the dashboard). `src/app/[slug]/page.tsx` is now a thin dispatcher —
+      `getStorefront(slug)` → `resolveStorefront(slug)` (`src/storefronts/registry.ts`, keyed
+      directly by slug) → render that business's template component.
+- [x] `src/storefronts/hila/` — Hila's real design (video hero + `index.tsx` composer), moved
+      as-is out of `src/app/[slug]/`.
+- [x] `src/storefronts/default/` — plain fallback template for a business with no custom build yet.
+- [x] `product-catalog.tsx`/`product-modal.tsx` moved to shared `src/components/storefront/`
+      (generic, used by every template — not duplicated per business).
+- [x] `main` merged with the video-hero commit (`storefront-hero-video-redesign` branch,
+      fast-forwarded) before this refactor started. **Not yet pushed to `origin/main`.**
+- [x] Verified: typecheck/build/tests (26/26) clean + live dev-server check (`/test` 200 w/
+      `hero.mp4`, unknown slug still 404s). Full detail in `PROGRESS.md`.
+
 ## Next
-Phase C (owner dashboard overhaul) is done. Next up per `PROGRESS.md`'s roadmap is Phase 5
-(cart → checkout → order submission from the storefront), unless you want a browser pass on the
-new revenue chart first.
+1. **Push `main` to `origin/main`** (currently 1 commit ahead of remote, local-only) — ask before
+   doing this, or do it whenever convenient.
+2. **Owner dashboard features** — user has additional feature requests for the owner-side dashboard
+   (מוצרים/לו"ז/נתונים tabs), to be captured here once described, BEFORE moving on to Phase 5.
+3. Phase 5 (cart → checkout → order submission from the storefront) — per `PROGRESS.md`'s roadmap,
+   comes after the dashboard features above. Note: once built, checkout logic should live in
+   `src/modules/orders/service.ts` + be called from the shared `src/components/cart/*`, so it
+   automatically works for every business's storefront template, not just Hila's.
+4. Optional: a real browser pass on the stats revenue chart (`src/app/dashboard/stats/
+   revenue-chart.tsx`) — pixel-level rendering still hasn't been screenshot-verified, no headless
+   browser tool was available when it was built.

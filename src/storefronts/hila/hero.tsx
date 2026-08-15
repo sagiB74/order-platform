@@ -1,9 +1,15 @@
-// Storefront hero — full-bleed rectangular section with a looping background
-// video, a dark top-to-bottom gradient for text legibility, and the business
-// name + tagline overlaid. Modeled on avantage.co.il's hero mechanism: a
-// relatively-positioned section, an absolutely-positioned cover background, a
-// gradient overlay, and heading content in normal flow on top (no z-index
-// needed — paint order alone puts it above).
+// Hila's storefront hero — full-bleed rectangular section with a looping
+// background video, a dark top-to-bottom gradient for text legibility, and
+// the business name + tagline overlaid. Modeled on avantage.co.il's hero
+// mechanism: a relatively-positioned section, an absolutely-positioned cover
+// background, a gradient overlay, and heading content in normal flow on top
+// (no z-index needed — paint order alone puts it above).
+//
+// This component is intentionally specific to Hila (hardcoded /hero.mp4 +
+// slogan text below) — that's why it lives in src/storefronts/hila/ rather
+// than the shared src/components/storefront/. A business without its own
+// custom-built hero gets src/storefronts/default/hero.tsx instead. See
+// src/storefronts/registry.ts for how a business is matched to its template.
 //
 // Background is `public/hero.mp4` — Hila's pilot demo clip, used as a
 // PLACEHOLDER for now (a stand-in until a final shot list/edit exists, not a

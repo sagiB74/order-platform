@@ -5,6 +5,12 @@
 // the block stays a clean rectangle. Tapping a tile's image OR its add-to-cart
 // button always opens the quantity-selection modal — the modal is the only
 // place a product actually gets added to the cart (see product-modal.tsx).
+//
+// Lives in src/components/storefront/ (not under src/storefronts/<business>/)
+// because nothing about this grid is business-specific — it's shared across
+// every business's custom storefront template. Only genuinely bespoke pieces
+// (like a hero) live inside a business's own src/storefronts/<slug>/ folder.
+// See src/storefronts/registry.ts for how templates are wired up.
 import { useState } from "react";
 import { formatCents } from "@/lib/money";
 import { ProductModal, type Selected } from "./product-modal";
