@@ -16,7 +16,7 @@
     "db:seed:history": "tsx prisma/seed-orders-history.ts",
     "db:seed:pending": "tsx prisma/seed-pending-orders.ts",
     "db:seed:branding": "tsx prisma/seed-branding.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "next typegen && tsc --noEmit",
     "test": "vitest run",
     "db:deploy": "prisma migrate deploy"
   },

@@ -31,6 +31,11 @@ jobs:
       # wasn't regenerated locally fails here rather than in production.
       - run: npx prisma generate
 
+      # `npm run typecheck` runs `next typegen` first. Next generates the global
+      # route types (LayoutProps, PageProps) into .next/types during a dev or
+      # build pass, so bare `tsc` passes locally — where .next is already warm —
+      # and fails on a clean checkout like this one. Generating them explicitly
+      # keeps CI and a developer's machine checking the same thing.
       - name: Typecheck
         run: npm run typecheck
 
