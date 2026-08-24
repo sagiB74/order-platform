@@ -23,7 +23,13 @@ export const CreateBusinessInput = z.object({
     .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, {
       error: "Slug must be lowercase letters, numbers, and single hyphens.",
     }),
-  ownerEmail: z.email({ error: "Enter a valid owner email." }),
+  // Lowercased so the stored value always matches what the login action looks
+  // up (it normalises the same way). Without this, an owner created as
+  // "Owner@x.com" could never sign in.
+  ownerEmail: z
+    .email({ error: "Enter a valid owner email." })
+    .max(254)
+    .transform((v) => v.trim().toLowerCase()),
   ownerPassword: z
     .string()
     .min(8, { error: "Owner password must be at least 8 characters." }),

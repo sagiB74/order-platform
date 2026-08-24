@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    env:
+      # The test suite never touches a database, but src/lib/env.ts validates the
+      # environment at import time and refuses to start without these. Dummy
+      # values are enough: nothing here connects, and SESSION_SECRET only has to
+      # satisfy the >= 32 character rule.
+      DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+      SESSION_SECRET: ci-placeholder-secret-not-used-for-anything-real
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # The Prisma client is committed, but regenerate so a schema change that
+      # wasn't regenerated locally fails here rather than in production.
+      - run: npx prisma generate
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Tests
+        run: npm test

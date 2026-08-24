@@ -202,3 +202,26 @@ model OrderItem {
   @@index([businessId])
   @@map("order_items")
 }
+
+// Login attempts, for rate limiting and brute-force lockout.
+//
+// WHY a table and not an in-memory counter: this app is deployed serverless
+// (Vercel), where each request may hit a different, short-lived instance. An
+// in-process Map would reset constantly and share nothing between instances,
+// making it security theatre. Postgres is the only state all instances agree on.
+//
+// Rows are pruned opportunistically on write, so this stays small without a cron.
+model LoginAttempt {
+  id String @id @default(cuid())
+
+  // Lowercased email that was TRIED — not a foreign key, because the whole
+  // point is to also record attempts against emails that don't exist.
+  email     String
+  ipAddress String
+  succeeded Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([email, createdAt])
+  @@index([ipAddress, createdAt])
+  @@map("login_attempts")
+}

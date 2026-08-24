@@ -58,9 +58,20 @@ export function CartProvider({
   const [hydrated, setHydrated] = useState(false);
 
   // Load once on mount (localStorage is only available in the browser).
+  //
+  // This HAS to be an effect rather than a lazy useState initializer: the server
+  // renders with an empty cart, so seeding state during the hydration render
+  // would make the client's first paint disagree with the server's HTML and
+  // trigger a hydration mismatch (CartBar renders nothing at all when the cart
+  // is empty, so the difference is structural, not cosmetic).
+  //
+  // Reading from localStorage on mount is exactly the "subscribe to an external
+  // system" case the React docs describe; it runs once per storageKey and
+  // cannot cascade.
   useEffect(() => {
     try {
       const raw = localStorage.getItem(storageKey);
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- see above
       if (raw) setItems(JSON.parse(raw) as CartItems);
     } catch {
       /* ignore corrupt storage */
