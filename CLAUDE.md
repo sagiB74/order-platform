@@ -8,7 +8,7 @@ storefront at `/[slug]`, a private owner dashboard, and there is one platform su
 First real tenant: a gluten-free maker (~6 products) whose storefront must be beautiful and
 Instagram-shareable.
 
-The current phase-by-phase status and "where we left off" lives in **@PROGRESS.md** — read it first.
+The current phase-by-phase status and "where we left off" lives in **@docs/PROGRESS.md** — read it first.
 
 ## Environment (important gotchas)
 - **Node 20 via nvm.** System `node` is 18 (too old). Interactive terminals auto-load nvm.

@@ -1,14 +1,35 @@
 // Orders module — creating orders and reading them back for the schedule.
 //
 // Same isolation discipline as the rest of the app: every function takes a
-// TenantContext and calls assertCanAccessBusiness before touching data. Orders
-// are created manually by the owner for now (WhatsApp/phone); later the public
-// storefront will call createOrder with the same shape.
+// TenantContext and calls a guard before touching data.
+//
+// `createOrder` is the ONE function here that accepts the wide `TenantContext`,
+// because it is the single write an anonymous storefront visitor is allowed to
+// reach (that's how a customer places an order). Every other function takes the
+// narrower `ManageContext`, so a storefront context can't even be passed to
+// them — approve/reject/stats/schedule reads are owner-only at compile time as
+// well as at runtime.
 import "server-only";
 import { z } from "zod";
 import { db } from "@/lib/db";
-import { assertCanAccessBusiness, type TenantContext } from "@/modules/tenant/context";
-import { NotFoundError, ValidationError } from "@/lib/errors";
+import {
+  assertCanAccessBusiness,
+  assertCanManageBusiness,
+  assertIsManager,
+  type ManageContext,
+  type TenantContext,
+} from "@/modules/tenant/context";
+import {
+  InventoryUnavailableError,
+  NotFoundError,
+  ValidationError,
+} from "@/lib/errors";
+import {
+  buildOrderLines,
+  checkAvailability,
+  missingProductIds,
+  sumQuantities,
+} from "@/modules/orders/pricing";
 import { OrderStatus, InventoryMode } from "@/generated/prisma/enums";
 import { lastMonths, monthRange } from "@/lib/schedule";
 
@@ -38,89 +59,148 @@ export type CreateOrderInput = z.infer<typeof CreateOrderInput>;
 // ---- Create ----------------------------------------------------------------
 
 /**
- * Create an order for a business. We look up every referenced product SCOPED to
- * this business, which does two jobs at once:
- *   1. It stops an order from referencing another tenant's product.
- *   2. It gives us the authoritative name + price to SNAPSHOT onto each line, so
- *      later edits/deletes to the product never rewrite this order's history.
+ * Create an order for a business.
  *
- * Also advances the inventory-limit state machine: for any ordered product
- * currently LIMITED, this order's quantity is added to limitSoldCount, and if
- * that reaches limitMaxQuantity the product auto-flips to OUT_OF_STOCK. This
- * order itself is never blocked/rejected for exceeding the limit — the flip
- * only affects orders placed AFTER this one. Order + inventory updates happen
- * in one transaction so they can't drift apart on a partial failure.
+ * This is the ONE write reachable by an anonymous storefront visitor, so two
+ * things are derived from WHO IS ASKING rather than accepted as input:
+ *
+ *   1. STATUS. A storefront context produces PENDING (the owner's approval
+ *      queue); an owner/admin context produces OPEN (she is entering an order
+ *      she already took by phone, and doesn't need to approve herself). Because
+ *      it is computed from ctx.kind, there is no field a client could send to
+ *      skip the approval gate — it isn't in any input schema.
+ *   2. INVENTORY ENFORCEMENT. Public checkouts are blocked when an item is gone;
+ *      the owner is NOT, since she must still be able to record an order for
+ *      something she's already agreed to make. Override with `options` if needed.
+ *
+ * Products are looked up SCOPED to this business, which does two jobs at once:
+ * it stops an order referencing another tenant's product (a crafted id simply
+ * doesn't resolve), and it yields the authoritative name + price to SNAPSHOT
+ * onto each line, so later edits never rewrite a placed order's history. See
+ * ./pricing.ts — buildOrderLines has no price parameter, so a tampered cart
+ * price has nowhere to enter.
+ *
+ * Everything — the product read, the availability check, the order insert and
+ * the limit bookkeeping — happens inside ONE transaction. The read used to sit
+ * outside it, which left a read-then-write race: two simultaneous checkouts
+ * could both see "1 left" and both succeed. Limits are now claimed with a
+ * conditional updateMany that fails if another transaction moved the counter.
  */
 export async function createOrder(
   ctx: TenantContext,
   businessId: string,
   input: CreateOrderInput,
+  options?: { enforceInventory?: boolean },
 ) {
+  // Must stay the first statement: a cross-tenant attempt is rejected before
+  // any database access at all.
   assertCanAccessBusiness(ctx, businessId);
 
+  const isPublic = ctx.kind === "storefront";
+  const status = isPublic ? OrderStatus.PENDING : OrderStatus.OPEN;
+  const enforceInventory = options?.enforceInventory ?? isPublic;
+
   const productIds = [...new Set(input.items.map((i) => i.productId))];
-  const products = await db.product.findMany({
-    where: { id: { in: productIds }, businessId },
-    select: {
-      id: true,
-      name: true,
-      priceCents: true,
-      inventoryMode: true,
-      limitMaxQuantity: true,
-      limitSoldCount: true,
-    },
-  });
-  const byId = new Map(products.map((p) => [p.id, p]));
-
-  // Every referenced product must exist AND belong to this business.
-  const missing = productIds.filter((id) => !byId.has(id));
-  if (missing.length > 0) {
-    throw new ValidationError("One or more products are invalid for this business.");
-  }
-
-  const itemsData = input.items.map((i) => {
-    const p = byId.get(i.productId)!;
-    return {
-      businessId,
-      productId: p.id,
-      nameSnapshot: p.name,
-      priceCentsSnapshot: p.priceCents,
-      quantity: i.quantity,
-    };
-  });
-
-  // Sum quantity per product first — an order could list the same product
-  // across more than one line.
-  const orderedQtyByProduct = new Map<string, number>();
-  for (const i of input.items) {
-    orderedQtyByProduct.set(i.productId, (orderedQtyByProduct.get(i.productId) ?? 0) + i.quantity);
-  }
 
   return db.$transaction(async (tx) => {
+    const products = await tx.product.findMany({
+      where: { id: { in: productIds }, businessId },
+      select: {
+        id: true,
+        name: true,
+        priceCents: true,
+        inventoryMode: true,
+        limitMaxQuantity: true,
+        limitSoldCount: true,
+        limitExpiresAt: true,
+      },
+    });
+
+    // Covers both "deleted since the page loaded" and "belongs to another
+    // tenant" — neither comes back from the business-scoped query above.
+    const missing = missingProductIds(input.items, products);
+    if (missing.length > 0) {
+      if (enforceInventory) {
+        throw new InventoryUnavailableError(
+          missing.map((productId) => ({
+            productId,
+            reason: "REMOVED" as const,
+            availableQuantity: 0,
+          })),
+        );
+      }
+      throw new ValidationError("One or more products are invalid for this business.");
+    }
+
+    if (enforceInventory) {
+      const problems = checkAvailability(input.items, products, new Date());
+      if (problems.length > 0) throw new InventoryUnavailableError(problems);
+    }
+
     const order = await tx.order.create({
       data: {
         businessId,
         customerName: input.customerName,
         customerPhone: input.customerPhone,
         pickupAt: input.pickupAt,
+        status,
         notes: input.notes ?? null,
-        items: { create: itemsData },
+        items: {
+          create: buildOrderLines(input.items, products).map((line) => ({
+            ...line,
+            businessId,
+          })),
+        },
       },
       include: { items: true },
     });
 
-    for (const [productId, qty] of orderedQtyByProduct) {
-      const p = byId.get(productId)!;
-      if (p.inventoryMode !== InventoryMode.LIMITED) continue;
-      const newSoldCount = p.limitSoldCount + qty;
-      const exhausted = p.limitMaxQuantity !== null && newSoldCount >= p.limitMaxQuantity;
-      await tx.product.update({
-        where: { id: productId },
-        data: {
-          limitSoldCount: newSoldCount,
-          ...(exhausted ? { inventoryMode: InventoryMode.OUT_OF_STOCK } : {}),
-        },
-      });
+    const byId = new Map(products.map((p) => [p.id, p]));
+    for (const [productId, qty] of sumQuantities(input.items)) {
+      const product = byId.get(productId)!;
+      if (product.inventoryMode !== InventoryMode.LIMITED) continue;
+
+      if (enforceInventory) {
+        // Claim the units atomically. `limitSoldCount: product.limitSoldCount`
+        // acts as an optimistic-concurrency token: if a competing transaction
+        // already incremented the counter, this predicate no longer matches and
+        // count comes back 0. Postgres re-evaluates an UPDATE's WHERE after
+        // taking the row lock under READ COMMITTED, so this is exactly the
+        // compare-and-set we need — no raw SELECT ... FOR UPDATE required.
+        const claimed = await tx.product.updateMany({
+          where: {
+            id: productId,
+            businessId,
+            inventoryMode: InventoryMode.LIMITED,
+            limitSoldCount: product.limitSoldCount,
+          },
+          data: { limitSoldCount: { increment: qty } },
+        });
+        if (claimed.count === 0) {
+          // Lost the race. Throwing rolls the whole transaction back, so the
+          // order row just created never persists — no orphan.
+          throw new InventoryUnavailableError([
+            { productId, reason: "LIMITED", availableQuantity: 0 },
+          ]);
+        }
+      } else {
+        // Owner path, unchanged in spirit: record the sale, never block on it.
+        await tx.product.update({
+          where: { id: productId },
+          data: { limitSoldCount: { increment: qty } },
+        });
+      }
+
+      // Auto-flip once the run is used up, so LATER orders see it as sold out.
+      const exhausted =
+        product.limitMaxQuantity !== null &&
+        product.limitSoldCount + qty >= product.limitMaxQuantity;
+      if (exhausted) {
+        await tx.product.updateMany({
+          where: { id: productId, businessId, inventoryMode: InventoryMode.LIMITED },
+          data: { inventoryMode: InventoryMode.OUT_OF_STOCK },
+        });
+      }
     }
 
     return order;
@@ -139,12 +219,12 @@ export async function createOrder(
  * approval queue instead.
  */
 export async function listOrdersInRange(
-  ctx: TenantContext,
+  ctx: ManageContext,
   businessId: string,
   startInclusive: Date,
   endExclusive: Date,
 ) {
-  assertCanAccessBusiness(ctx, businessId);
+  assertCanManageBusiness(ctx, businessId);
   return db.order.findMany({
     where: {
       businessId,
@@ -165,8 +245,8 @@ export async function listOrdersInRange(
  * shown in the schedule's sidebar. Not scoped by pickup date (a pending order
  * isn't "on the schedule" at all yet), just by business + status.
  */
-export async function listPendingOrders(ctx: TenantContext, businessId: string) {
-  assertCanAccessBusiness(ctx, businessId);
+export async function listPendingOrders(ctx: ManageContext, businessId: string) {
+  assertCanManageBusiness(ctx, businessId);
   return db.order.findMany({
     where: { businessId, status: OrderStatus.PENDING },
     orderBy: { pickupAt: "asc" },
@@ -183,19 +263,21 @@ export async function listPendingOrders(ctx: TenantContext, businessId: string) 
  * rejected order is actually deleted — it never made it onto the schedule.
  * OrderItem rows cascade-delete with it (see schema's onDelete: Cascade).
  */
-export async function rejectOrder(ctx: TenantContext, orderId: string): Promise<void> {
+export async function rejectOrder(ctx: ManageContext, orderId: string): Promise<void> {
+  assertIsManager(ctx);
   const existing = await db.order.findUnique({
     where: { id: orderId },
     select: { businessId: true },
   });
   if (!existing) throw new NotFoundError("Order not found.");
-  assertCanAccessBusiness(ctx, existing.businessId);
+  assertCanManageBusiness(ctx, existing.businessId);
 
   await db.order.delete({ where: { id: orderId } });
 }
 
 /** Full details for one order (for the click-to-expand card). */
-export async function getOrder(ctx: TenantContext, orderId: string) {
+export async function getOrder(ctx: ManageContext, orderId: string) {
+  assertIsManager(ctx);
   const order = await db.order.findUnique({
     where: { id: orderId },
     include: {
@@ -205,7 +287,7 @@ export async function getOrder(ctx: TenantContext, orderId: string) {
     },
   });
   if (!order) throw new NotFoundError("Order not found.");
-  assertCanAccessBusiness(ctx, order.businessId);
+  assertCanManageBusiness(ctx, order.businessId);
   return order;
 }
 
@@ -214,16 +296,17 @@ export async function getOrder(ctx: TenantContext, orderId: string) {
  * showing it (greyed), per the owner's request.
  */
 export async function setOrderStatus(
-  ctx: TenantContext,
+  ctx: ManageContext,
   orderId: string,
   status: OrderStatus,
 ) {
+  assertIsManager(ctx);
   const existing = await db.order.findUnique({
     where: { id: orderId },
     select: { businessId: true },
   });
   if (!existing) throw new NotFoundError("Order not found.");
-  assertCanAccessBusiness(ctx, existing.businessId);
+  assertCanManageBusiness(ctx, existing.businessId);
 
   return db.order.update({
     where: { id: orderId },
@@ -257,13 +340,13 @@ export type MonthPoint = {
  * zero point (pre-seeded below) so the chart never has a silently-missing tick.
  */
 export async function getSalesTimeSeries(
-  ctx: TenantContext,
+  ctx: ManageContext,
   businessId: string,
   endYear: number,
   endMonthIndex: number,
   months = 12,
 ): Promise<MonthPoint[]> {
-  assertCanAccessBusiness(ctx, businessId);
+  assertCanManageBusiness(ctx, businessId);
 
   const window = lastMonths(endYear, endMonthIndex, months);
   const rangeStart = monthRange(window[0].year, window[0].monthIndex).start;
@@ -321,12 +404,12 @@ export type MonthlyProductStats = {
  * product or two products sharing a name never merges/splits history.
  */
 export async function getMonthlyProductStats(
-  ctx: TenantContext,
+  ctx: ManageContext,
   businessId: string,
   year: number,
   monthIndex: number,
 ): Promise<MonthlyProductStats> {
-  assertCanAccessBusiness(ctx, businessId);
+  assertCanManageBusiness(ctx, businessId);
 
   const { start, end } = monthRange(year, monthIndex);
   const orders = await db.order.findMany({
@@ -395,13 +478,13 @@ export type StatsOverview = {
  * even though both calls it makes guard themselves.
  */
 export async function getStatsOverview(
-  ctx: TenantContext,
+  ctx: ManageContext,
   businessId: string,
   year: number,
   monthIndex: number,
   months = 12,
 ): Promise<StatsOverview> {
-  assertCanAccessBusiness(ctx, businessId);
+  assertCanManageBusiness(ctx, businessId);
 
   const [series, monthly] = await Promise.all([
     getSalesTimeSeries(ctx, businessId, year, monthIndex, months),

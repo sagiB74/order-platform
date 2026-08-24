@@ -21,6 +21,7 @@ import {
 } from "@/modules/catalog/service";
 import { AppError, ForbiddenError } from "@/lib/errors";
 import { parseShekelsToCents } from "@/lib/money";
+import { requireId, requireInt } from "@/lib/form";
 
 const PRODUCTS_PATH = "/dashboard/products";
 
@@ -114,14 +115,14 @@ export async function createCategoryAction(
  */
 export async function setInventoryUnlimitedAction(formData: FormData): Promise<void> {
   const { ctx } = await requireTenantContext();
-  const productId = (formData.get("productId") ?? "").toString();
+  const productId = requireId(formData, "productId");
   await setInventoryUnlimited(ctx, productId);
   revalidatePath(PRODUCTS_PATH);
 }
 
 export async function setInventoryOutOfStockAction(formData: FormData): Promise<void> {
   const { ctx } = await requireTenantContext();
-  const productId = (formData.get("productId") ?? "").toString();
+  const productId = requireId(formData, "productId");
   await setInventoryOutOfStock(ctx, productId);
   revalidatePath(PRODUCTS_PATH);
 }
@@ -132,9 +133,12 @@ export async function setInventoryLimitedAction(
 ): Promise<FormState> {
   try {
     const { ctx } = await requireTenantContext();
-    const productId = (formData.get("productId") ?? "").toString();
-    const days = Number(formData.get("days"));
-    const maxQuantity = Number(formData.get("maxQuantity"));
+    const productId = requireId(formData, "productId");
+    // Validated here rather than letting Number() produce NaN/Infinity: the
+    // service does re-parse, but a ZodError there is not an AppError and would
+    // surface as the generic "something went wrong" instead of a useful message.
+    const days = requireInt(formData, "days", { min: 1, max: 365 });
+    const maxQuantity = requireInt(formData, "maxQuantity", { min: 1, max: 100_000 });
     await setInventoryLimited(ctx, productId, { days, maxQuantity });
     revalidatePath(PRODUCTS_PATH);
     return { ok: true, message: "המגבלה הוגדרה." };
@@ -147,7 +151,7 @@ export async function setInventoryLimitedAction(
 
 export async function deleteProductAction(formData: FormData): Promise<void> {
   const { ctx } = await requireTenantContext();
-  const productId = (formData.get("productId") ?? "").toString();
+  const productId = requireId(formData, "productId");
   await deleteProduct(ctx, productId);
   revalidatePath(PRODUCTS_PATH);
 }

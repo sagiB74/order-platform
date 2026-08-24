@@ -16,7 +16,7 @@ import { redirect } from "next/navigation";
 import { db } from "@/lib/db";
 import { readSession, type SessionPayload } from "@/lib/session";
 import { Role } from "@/generated/prisma/enums";
-import type { TenantContext } from "@/modules/tenant/context";
+import type { ManageContext } from "@/modules/tenant/context";
 
 // What we expose about the logged-in user. Note: NO passwordHash — a DTO of
 // only the safe fields, so sensitive columns never leak out of this layer.
@@ -63,8 +63,14 @@ export async function requireUser(): Promise<AuthUser> {
  * Turn the authenticated user into a TenantContext — the object every service
  * uses to enforce isolation. Built from the DB user (secure), never from a
  * client-supplied value.
+ *
+ * Returns the narrower `ManageContext` (platform | business) rather than the
+ * full TenantContext, and deliberately so: a session can never produce a
+ * `storefront` context. That's what lets owner-only services declare
+ * `ctx: ManageContext` and become uncallable with an anonymous visitor's
+ * context at COMPILE time.
  */
-export function toTenantContext(user: AuthUser): TenantContext {
+export function toTenantContext(user: AuthUser): ManageContext {
   if (user.role === Role.SUPER_ADMIN) {
     return { kind: "platform" };
   }
@@ -80,7 +86,7 @@ export function toTenantContext(user: AuthUser): TenantContext {
 /** Convenience: require a logged-in user and return their TenantContext. */
 export async function requireTenantContext(): Promise<{
   user: AuthUser;
-  ctx: TenantContext;
+  ctx: ManageContext;
 }> {
   const user = await requireUser();
   return { user, ctx: toTenantContext(user) };

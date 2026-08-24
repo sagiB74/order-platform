@@ -15,7 +15,7 @@
 // If slugs ever need to change independently of which design a business
 // uses, or this needs to be visible/editable from /admin, promote this to a
 // `Business.storefrontTemplate` column instead — see the discussion this
-// registry came out of in PROGRESS.md.
+// registry came out of in docs/PROGRESS.md.
 import type { ComponentType } from "react";
 import type { Storefront } from "@/modules/storefront/service";
 import { HilaStorefront } from "./hila";
@@ -24,7 +24,7 @@ import { DefaultStorefront } from "./default";
 export type StorefrontComponent = ComponentType<{ storefront: Storefront }>;
 
 const registry: Record<string, StorefrontComponent> = {
-  test: HilaStorefront, // Hila's demo business — slug is "test" (see PROGRESS.md)
+  test: HilaStorefront, // Hila's demo business — slug is "test" (see docs/PROGRESS.md)
 };
 
 export function resolveStorefront(slug: string): StorefrontComponent {

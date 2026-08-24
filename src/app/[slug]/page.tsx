@@ -29,6 +29,13 @@ export default async function StorefrontPage({
   const storefront = await getStorefront(slug);
   if (!storefront) notFound();
 
+  // The lint rule below guards against DEFINING a component inside a render,
+  // which remounts its subtree every time. This is a lookup, not a definition:
+  // resolveStorefront returns one of a fixed set of module-level components from
+  // the registry. It's also a Server Component, rendered once per request, so
+  // there is no client reconciliation to disturb. Picking the template here is
+  // the entire purpose of the dispatcher (see src/storefronts/registry.ts).
   const Template = resolveStorefront(slug);
+  // eslint-disable-next-line react-hooks/static-components
   return <Template storefront={storefront} />;
 }

@@ -1,13 +1,15 @@
 "use client";
 // The persistent cart indicator: a sticky bottom banner that appears the moment
 // the cart has at least one item, and a slide-up sheet to review/adjust the order.
-// Checkout submission is a later phase — the final button is a friendly placeholder.
+// "המשך להזמנה" navigates to /[slug]/checkout, which is where the order is
+// actually submitted (see components/cart/checkout-form.tsx).
 import { useState } from "react";
+import Link from "next/link";
 import { useCart } from "./cart-context";
 import { formatCents } from "@/lib/money";
 
 export function CartBar() {
-  const { lines, count, totalCents, setQty } = useCart();
+  const { lines, count, totalCents, setQty, slug } = useCart();
   const [open, setOpen] = useState(false);
 
   if (count === 0) return null;
@@ -89,21 +91,15 @@ export function CartBar() {
                 <span>סה״כ</span>
                 <span>{formatCents(totalCents)}</span>
               </div>
-              <button
-                type="button"
-                onClick={(e) => {
-                  const btn = e.currentTarget;
-                  btn.textContent = "בקרוב — שליחת הזמנה ✨";
-                  setTimeout(() => {
-                    btn.textContent = "המשך להזמנה";
-                  }, 1600);
-                }}
-                className="w-full rounded-2xl bg-accent py-4 text-base font-extrabold text-white transition-colors hover:bg-accent-strong"
+              <Link
+                href={`/${slug}/checkout`}
+                onClick={() => setOpen(false)}
+                className="block w-full rounded-2xl bg-accent py-4 text-center text-base font-extrabold text-white transition-colors hover:bg-accent-strong"
               >
                 המשך להזמנה
-              </button>
+              </Link>
               <p className="mt-3 text-center text-xs text-ink-soft">
-                איסוף עצמי · תיאום זמן בהמשך
+                איסוף עצמי · בחירת מועד בעמוד הבא
               </p>
             </div>
           </div>

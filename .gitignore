@@ -32,6 +32,9 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# ...but the template MUST be committed, or a fresh clone can't discover which
+# variables the app needs.
+!.env.example
 
 # vercel
 .vercel
@@ -53,3 +56,10 @@ credentials.json
 # local tool state (personal machine settings, not project config)
 .claude/settings.local.json
 .playwright-mcp/
+
+# AI assistant tooling — local developer config and vendored docs. Kept on disk
+# so the tools keep working, but not part of the source of record.
+.agents/
+.windsurf/
+.claude/
+skills-lock.json
