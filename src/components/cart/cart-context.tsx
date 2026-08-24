@@ -1,12 +1,16 @@
 "use client";
 // The customer's shopping cart — a small client-side store (React Context +
-// localStorage). This is NEW state that lives only in the browser; it does not
-// touch the server or the database. Turning a cart into a real submitted order
-// (which lands on the owner's schedule) is a later phase; for now the cart powers
-// add-to-cart, quantities, and the sticky banner.
+// localStorage). This state lives only in the browser. Submitting it becomes a
+// real Order via the checkout form, which posts productIds and quantities to
+// submitCheckoutAction; prices here are for DISPLAY ONLY and are never sent —
+// the server re-reads them from the database.
 //
-// The cart is namespaced per business (storageKey), so visiting two different
-// storefronts never mixes their carts.
+// The cart is namespaced per business (derived from the slug), so visiting two
+// different storefronts never mixes their carts.
+//
+// The provider is mounted in src/app/[slug]/layout.tsx rather than inside each
+// storefront template, so both the catalog page and the /[slug]/checkout route
+// share one cart.
 import {
   createContext,
   useCallback,
@@ -36,17 +40,20 @@ type CartValue = {
   setLine: (item: Omit<CartLine, "quantity">, qty: number) => void;
   remove: (id: string) => void;
   clear: () => void;
+  /** The business slug this cart belongs to — needed to post to the right store. */
+  slug: string;
 };
 
 const CartContext = createContext<CartValue | null>(null);
 
 export function CartProvider({
-  storageKey,
+  slug,
   children,
 }: {
-  storageKey: string;
+  slug: string;
   children: ReactNode;
 }) {
+  const storageKey = `cart:${slug}`;
   const [items, setItems] = useState<CartItems>({});
   const [hydrated, setHydrated] = useState(false);
 
@@ -122,8 +129,9 @@ export function CartProvider({
       setLine,
       remove,
       clear,
+      slug,
     };
-  }, [items, add, setQty, setLine, remove, clear]);
+  }, [items, add, setQty, setLine, remove, clear, slug]);
 
   return <CartContext.Provider value={value}>{children}</CartContext.Provider>;
 }

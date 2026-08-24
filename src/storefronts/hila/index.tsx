@@ -8,7 +8,6 @@
 // audited place (src/modules/storefront/service.ts) no matter how many
 // custom designs get added later.
 import type { Storefront } from "@/modules/storefront/service";
-import { CartProvider } from "@/components/cart/cart-context";
 import { CartBar } from "@/components/cart/cart-bar";
 import { ProductCatalog } from "@/components/storefront/product-catalog";
 import { Hero } from "./hero";
@@ -17,10 +16,8 @@ export function HilaStorefront({ storefront }: { storefront: Storefront }) {
   return (
     <main className="min-h-full">
       <Hero business={storefront.business} branding={storefront.branding} />
-      <CartProvider storageKey={`cart:${storefront.business.slug}`}>
-        <ProductCatalog groups={storefront.groups} />
-        <CartBar />
-      </CartProvider>
+      <ProductCatalog groups={storefront.groups} />
+      <CartBar />
     </main>
   );
 }

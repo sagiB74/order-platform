@@ -40,3 +40,26 @@ export class NotFoundError extends AppError {
     super(message, 404, "NOT_FOUND");
   }
 }
+
+/**
+ * Some requested items are no longer orderable (deleted, sold out, or over a
+ * remaining limit). 409 rather than 400: the request was well-formed, it just
+ * lost a race against the current state of the catalog.
+ *
+ * Carries the affected lines so the storefront can tell the customer exactly
+ * what changed and offer to fix their cart, instead of failing with one opaque
+ * message. `lines` is structural (productId + reason + availableQuantity) so
+ * lib/ takes no runtime dependency on modules/.
+ */
+export class InventoryUnavailableError extends AppError {
+  constructor(
+    public readonly lines: {
+      productId: string;
+      reason: "REMOVED" | "OUT_OF_STOCK" | "LIMITED";
+      availableQuantity: number;
+    }[],
+    message = "Some items are no longer available.",
+  ) {
+    super(message, 409, "INVENTORY_UNAVAILABLE");
+  }
+}

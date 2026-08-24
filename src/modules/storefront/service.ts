@@ -7,7 +7,7 @@
 import "server-only";
 import { db } from "@/lib/db";
 import { listCategories, listProducts } from "@/modules/catalog/service";
-import type { TenantContext } from "@/modules/tenant/context";
+import type { StorefrontContext } from "@/modules/tenant/context";
 
 export type StorefrontBranding = {
   logoUrl?: string;
@@ -55,22 +55,56 @@ function parseBranding(value: unknown): StorefrontBranding {
   };
 }
 
+export type ResolvedStorefront = {
+  ctx: StorefrontContext;
+  businessId: string;
+  name: string;
+  slug: string;
+  branding: StorefrontBranding;
+};
+
 /**
- * Load a business's public storefront by slug, or null if it doesn't exist or
- * isn't active. Shows only AVAILABLE products, grouped by category (in order),
- * dropping empty groups.
+ * Resolve a public slug to a business and a storefront TenantContext, or null
+ * if no ACTIVE business owns that slug.
+ *
+ * This is the ONLY place in the codebase that constructs a StorefrontContext.
+ * Keeping it to one function matters: the context is the authority an anonymous
+ * request carries, so it must always be derived from the URL slug on the server
+ * and never from anything the client sends. Both the public read (getStorefront)
+ * and the public write (checkout) go through here.
+ *
+ * A SUSPENDED business resolves to null, so suspending one closes its storefront
+ * to reads AND to new orders in a single check.
  */
-export async function getStorefront(slug: string): Promise<Storefront | null> {
+export async function resolveStorefront(slug: string): Promise<ResolvedStorefront | null> {
   const business = await db.business.findUnique({
     where: { slug },
     select: { id: true, name: true, slug: true, status: true, branding: true },
   });
   if (!business || business.status !== "ACTIVE") return null;
 
-  const ctx: TenantContext = { kind: "storefront", businessId: business.id };
+  return {
+    ctx: { kind: "storefront", businessId: business.id },
+    businessId: business.id,
+    name: business.name,
+    slug: business.slug,
+    branding: parseBranding(business.branding),
+  };
+}
+
+/**
+ * Load a business's public storefront by slug, or null if it doesn't exist or
+ * isn't active. Shows only AVAILABLE products, grouped by category (in order),
+ * dropping empty groups.
+ */
+export async function getStorefront(slug: string): Promise<Storefront | null> {
+  const resolved = await resolveStorefront(slug);
+  if (!resolved) return null;
+
+  const { ctx, businessId } = resolved;
   const [categories, products] = await Promise.all([
-    listCategories(ctx, business.id),
-    listProducts(ctx, business.id),
+    listCategories(ctx, businessId),
+    listProducts(ctx, businessId),
   ]);
 
   const available = products.filter((p) => p.isAvailable);
@@ -94,8 +128,8 @@ export async function getStorefront(slug: string): Promise<Storefront | null> {
   }
 
   return {
-    business: { name: business.name, slug: business.slug },
-    branding: parseBranding(business.branding),
+    business: { name: resolved.name, slug: resolved.slug },
+    branding: resolved.branding,
     groups: groups.filter((g) => g.items.length > 0),
   };
 }
