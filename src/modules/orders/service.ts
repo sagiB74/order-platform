@@ -1,13 +1,24 @@
 // Orders module — creating orders and reading them back for the schedule.
 //
 // Same isolation discipline as the rest of the app: every function takes a
-// TenantContext and calls assertCanAccessBusiness before touching data. Orders
-// are created manually by the owner for now (WhatsApp/phone); later the public
-// storefront will call createOrder with the same shape.
+// TenantContext and calls a guard before touching data.
+//
+// `createOrder` is the ONE function here that accepts the wide `TenantContext`,
+// because it is the single write an anonymous storefront visitor is allowed to
+// reach (that's how a customer places an order). Every other function takes the
+// narrower `ManageContext`, so a storefront context can't even be passed to
+// them — approve/reject/stats/schedule reads are owner-only at compile time as
+// well as at runtime.
 import "server-only";
 import { z } from "zod";
 import { db } from "@/lib/db";
-import { assertCanAccessBusiness, type TenantContext } from "@/modules/tenant/context";
+import {
+  assertCanAccessBusiness,
+  assertCanManageBusiness,
+  assertIsManager,
+  type ManageContext,
+  type TenantContext,
+} from "@/modules/tenant/context";
 import { NotFoundError, ValidationError } from "@/lib/errors";
 import { OrderStatus, InventoryMode } from "@/generated/prisma/enums";
 import { lastMonths, monthRange } from "@/lib/schedule";
@@ -139,12 +150,12 @@ export async function createOrder(
  * approval queue instead.
  */
 export async function listOrdersInRange(
-  ctx: TenantContext,
+  ctx: ManageContext,
   businessId: string,
   startInclusive: Date,
   endExclusive: Date,
 ) {
-  assertCanAccessBusiness(ctx, businessId);
+  assertCanManageBusiness(ctx, businessId);
   return db.order.findMany({
     where: {
       businessId,
@@ -165,8 +176,8 @@ export async function listOrdersInRange(
  * shown in the schedule's sidebar. Not scoped by pickup date (a pending order
  * isn't "on the schedule" at all yet), just by business + status.
  */
-export async function listPendingOrders(ctx: TenantContext, businessId: string) {
-  assertCanAccessBusiness(ctx, businessId);
+export async function listPendingOrders(ctx: ManageContext, businessId: string) {
+  assertCanManageBusiness(ctx, businessId);
   return db.order.findMany({
     where: { businessId, status: OrderStatus.PENDING },
     orderBy: { pickupAt: "asc" },
@@ -183,19 +194,21 @@ export async function listPendingOrders(ctx: TenantContext, businessId: string) 
  * rejected order is actually deleted — it never made it onto the schedule.
  * OrderItem rows cascade-delete with it (see schema's onDelete: Cascade).
  */
-export async function rejectOrder(ctx: TenantContext, orderId: string): Promise<void> {
+export async function rejectOrder(ctx: ManageContext, orderId: string): Promise<void> {
+  assertIsManager(ctx);
   const existing = await db.order.findUnique({
     where: { id: orderId },
     select: { businessId: true },
   });
   if (!existing) throw new NotFoundError("Order not found.");
-  assertCanAccessBusiness(ctx, existing.businessId);
+  assertCanManageBusiness(ctx, existing.businessId);
 
   await db.order.delete({ where: { id: orderId } });
 }
 
 /** Full details for one order (for the click-to-expand card). */
-export async function getOrder(ctx: TenantContext, orderId: string) {
+export async function getOrder(ctx: ManageContext, orderId: string) {
+  assertIsManager(ctx);
   const order = await db.order.findUnique({
     where: { id: orderId },
     include: {
@@ -205,7 +218,7 @@ export async function getOrder(ctx: TenantContext, orderId: string) {
     },
   });
   if (!order) throw new NotFoundError("Order not found.");
-  assertCanAccessBusiness(ctx, order.businessId);
+  assertCanManageBusiness(ctx, order.businessId);
   return order;
 }
 
@@ -214,16 +227,17 @@ export async function getOrder(ctx: TenantContext, orderId: string) {
  * showing it (greyed), per the owner's request.
  */
 export async function setOrderStatus(
-  ctx: TenantContext,
+  ctx: ManageContext,
   orderId: string,
   status: OrderStatus,
 ) {
+  assertIsManager(ctx);
   const existing = await db.order.findUnique({
     where: { id: orderId },
     select: { businessId: true },
   });
   if (!existing) throw new NotFoundError("Order not found.");
-  assertCanAccessBusiness(ctx, existing.businessId);
+  assertCanManageBusiness(ctx, existing.businessId);
 
   return db.order.update({
     where: { id: orderId },
@@ -257,13 +271,13 @@ export type MonthPoint = {
  * zero point (pre-seeded below) so the chart never has a silently-missing tick.
  */
 export async function getSalesTimeSeries(
-  ctx: TenantContext,
+  ctx: ManageContext,
   businessId: string,
   endYear: number,
   endMonthIndex: number,
   months = 12,
 ): Promise<MonthPoint[]> {
-  assertCanAccessBusiness(ctx, businessId);
+  assertCanManageBusiness(ctx, businessId);
 
   const window = lastMonths(endYear, endMonthIndex, months);
   const rangeStart = monthRange(window[0].year, window[0].monthIndex).start;
@@ -321,12 +335,12 @@ export type MonthlyProductStats = {
  * product or two products sharing a name never merges/splits history.
  */
 export async function getMonthlyProductStats(
-  ctx: TenantContext,
+  ctx: ManageContext,
   businessId: string,
   year: number,
   monthIndex: number,
 ): Promise<MonthlyProductStats> {
-  assertCanAccessBusiness(ctx, businessId);
+  assertCanManageBusiness(ctx, businessId);
 
   const { start, end } = monthRange(year, monthIndex);
   const orders = await db.order.findMany({
@@ -395,13 +409,13 @@ export type StatsOverview = {
  * even though both calls it makes guard themselves.
  */
 export async function getStatsOverview(
-  ctx: TenantContext,
+  ctx: ManageContext,
   businessId: string,
   year: number,
   monthIndex: number,
   months = 12,
 ): Promise<StatsOverview> {
-  assertCanAccessBusiness(ctx, businessId);
+  assertCanManageBusiness(ctx, businessId);
 
   const [series, monthly] = await Promise.all([
     getSalesTimeSeries(ctx, businessId, year, monthIndex, months),

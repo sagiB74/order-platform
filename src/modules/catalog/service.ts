@@ -11,10 +11,24 @@
 //   2. When the caller only knows a productId (update/delete/toggle), we must
 //      first LOAD the row to learn which business owns it, THEN assert. We never
 //      trust a client-supplied businessId; the owning id comes from the row.
+//      These also call `assertIsManager(ctx)` BEFORE the load, so an anonymous
+//      caller is rejected without a DB round-trip.
+//
+// READ vs WRITE: the two list functions take the wide `TenantContext` because
+// the public storefront legitimately reads them (see modules/storefront/service.ts).
+// Everything that MUTATES takes `ManageContext`, which a storefront visitor's
+// context is not assignable to — so those are unreachable from public code at
+// compile time, and rejected again at runtime by assertCanManageBusiness.
 import "server-only";
 import { z } from "zod";
 import { db } from "@/lib/db";
-import { assertCanAccessBusiness, type TenantContext } from "@/modules/tenant/context";
+import {
+  assertCanAccessBusiness,
+  assertCanManageBusiness,
+  assertIsManager,
+  type ManageContext,
+  type TenantContext,
+} from "@/modules/tenant/context";
 import { NotFoundError, ValidationError } from "@/lib/errors";
 import { InventoryMode } from "@/generated/prisma/enums";
 
@@ -66,11 +80,11 @@ export async function listCategories(ctx: TenantContext, businessId: string) {
 
 /** Create a category for a business. Caller must be allowed near it. */
 export async function createCategory(
-  ctx: TenantContext,
+  ctx: ManageContext,
   businessId: string,
   input: CreateCategoryInput,
 ) {
-  assertCanAccessBusiness(ctx, businessId);
+  assertCanManageBusiness(ctx, businessId);
   return db.category.create({
     data: { businessId, name: input.name },
     select: { id: true, name: true, sortOrder: true },
@@ -134,11 +148,11 @@ export async function listProducts(ctx: TenantContext, businessId: string) {
  * product to another tenant's category (a cross-tenant reference leak).
  */
 export async function createProduct(
-  ctx: TenantContext,
+  ctx: ManageContext,
   businessId: string,
   input: CreateProductInput,
 ) {
-  assertCanAccessBusiness(ctx, businessId);
+  assertCanManageBusiness(ctx, businessId);
 
   if (input.categoryId) {
     await assertCategoryBelongsToBusiness(input.categoryId, businessId);
@@ -164,16 +178,17 @@ export async function createProduct(
  * new category is owned by the same business.
  */
 export async function updateProduct(
-  ctx: TenantContext,
+  ctx: ManageContext,
   productId: string,
   input: UpdateProductInput,
 ) {
+  assertIsManager(ctx);
   const existing = await db.product.findUnique({
     where: { id: productId },
     select: { id: true, businessId: true },
   });
   if (!existing) throw new NotFoundError("Product not found.");
-  assertCanAccessBusiness(ctx, existing.businessId);
+  assertCanManageBusiness(ctx, existing.businessId);
 
   if (input.categoryId) {
     await assertCategoryBelongsToBusiness(input.categoryId, existing.businessId);
@@ -198,17 +213,18 @@ export async function updateProduct(
 // first (never trusts a client-supplied businessId), same pattern as
 // updateProduct/deleteProduct below.
 
-async function loadOwnedProduct(ctx: TenantContext, productId: string) {
+async function loadOwnedProduct(ctx: ManageContext, productId: string) {
+  assertIsManager(ctx);
   const existing = await db.product.findUnique({
     where: { id: productId },
     select: { businessId: true },
   });
   if (!existing) throw new NotFoundError("Product not found.");
-  assertCanAccessBusiness(ctx, existing.businessId);
+  assertCanManageBusiness(ctx, existing.businessId);
 }
 
 /** Directly mark a product out of stock (owner-initiated, not the auto-flip). */
-export async function setInventoryOutOfStock(ctx: TenantContext, productId: string) {
+export async function setInventoryOutOfStock(ctx: ManageContext, productId: string) {
   await loadOwnedProduct(ctx, productId);
   return db.product.update({
     where: { id: productId },
@@ -218,7 +234,7 @@ export async function setInventoryOutOfStock(ctx: TenantContext, productId: stri
 }
 
 /** Back to always-orderable; clears any leftover limit bookkeeping. */
-export async function setInventoryUnlimited(ctx: TenantContext, productId: string) {
+export async function setInventoryUnlimited(ctx: ManageContext, productId: string) {
   await loadOwnedProduct(ctx, productId);
   return db.product.update({
     where: { id: productId },
@@ -240,7 +256,7 @@ export async function setInventoryUnlimited(ctx: TenantContext, productId: strin
  * is what lazily reverts this back to UNLIMITED once limitExpiresAt passes.
  */
 export async function setInventoryLimited(
-  ctx: TenantContext,
+  ctx: ManageContext,
   productId: string,
   input: SetInventoryLimitedInput,
 ) {
@@ -262,13 +278,14 @@ export async function setInventoryLimited(
 }
 
 /** Delete a product, after confirming the caller owns it. */
-export async function deleteProduct(ctx: TenantContext, productId: string) {
+export async function deleteProduct(ctx: ManageContext, productId: string) {
+  assertIsManager(ctx);
   const existing = await db.product.findUnique({
     where: { id: productId },
     select: { businessId: true },
   });
   if (!existing) throw new NotFoundError("Product not found.");
-  assertCanAccessBusiness(ctx, existing.businessId);
+  assertCanManageBusiness(ctx, existing.businessId);
 
   await db.product.delete({ where: { id: productId } });
 }
