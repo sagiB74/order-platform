@@ -294,27 +294,85 @@ for.
 
 ---
 
-## 4. Known gaps (not fixed by this change)
+## 4. Follow-up hardening (commit `66ae8f2`)
 
-Being honest about what this commit did *not* address:
+Several gaps listed here originally were closed in a later pass, before the app
+was made deployable. Recorded because the *reasoning* is the interesting part.
+
+**Login brute-force protection.** Added per-email (5) and per-IP (20) failure
+limits in a 15-minute window. The design decision worth noting: it is backed by
+Postgres, not an in-memory `Map`. This app deploys serverless, where instances
+are short-lived and share no memory — a process-local counter would reset
+constantly and share nothing between instances, so it would *look* like a control
+while protecting almost nothing. The database is the only state all instances
+agree on. The check runs BEFORE the bcrypt compare, so a locked-out attacker
+can't keep making the server burn CPU.
+
+**A timing side channel on login.** The code previously skipped `verifyPassword`
+entirely when the email didn't exist:
+
+```ts
+const passwordOk = user ? await verifyPassword(password, user.passwordHash) : false;
+```
+
+bcrypt is deliberately slow (~100ms). Skipping it made unknown-email responses
+measurably faster, so an attacker could enumerate registered addresses by timing
+alone — leaking precisely what the deliberately-generic error message was there
+to hide. **A correct message with an incorrect timing profile is still a leak.**
+Fixed by always comparing, against a fixed dummy hash when the user is absent.
+
+**Unbounded password length.** bcrypt hashes the entire input, so a megabyte-long
+password field was a cheap asymmetric way to make the server do expensive work on
+every attempt. Capped at 200 characters.
+
+**Email normalisation.** Login now lowercases before both the rate-limit lookup
+and the user lookup, and business creation stores lowercased. Without this,
+`Admin@x.com` and `admin@x.com` would have had separate failure budgets — a
+trivial bypass of the very limit just added.
+
+**Security headers.** HSTS, `X-Frame-Options: DENY`, `X-Content-Type-Options:
+nosniff`, `Referrer-Policy`, `Permissions-Policy`, and `poweredByHeader: false`,
+set in `next.config.ts` (this app has no middleware layer to put them in).
+
+**Error boundaries.** `error.tsx` / `global-error.tsx` / `not-found.tsx` were
+absent, so any thrown error rendered Next's default crash page. The new boundary
+deliberately does **not** print `error.message` — a `ForbiddenError` or a Prisma
+error can carry row ids, table names, or connection details. It shows only the
+`digest`, which Next also writes to the server log, so a user can report a code
+that maps to the real stack trace without being shown any of it.
+
+**Input validation on the remaining server actions.** Ids now parse through a
+shared helper. Not an authorization hole (the services re-check ownership
+regardless), but unvalidated input was reaching the data layer, and
+`setInventoryLimited` read its numbers with a bare `Number()`, so `NaN` reached
+the service.
+
+---
+
+## 5. Still open
+
+Being honest about what is *not* addressed:
 
 - **No row-level security.** Isolation is enforced entirely in application code.
   Every table carries `businessId`, so Postgres RLS would be a genuine second
   layer beneath the service guards. Deliberately deferred.
 - **No session revocation.** The session JWT is stateless with a 7-day expiry.
   There is no server-side invalidation, so a stolen cookie stays valid until it
-  expires. No "log out all devices", no password-change invalidation.
-- **No rate limiting or brute-force protection on login,** and the login path
-  skips the bcrypt compare entirely when the email is unknown, which leaks
-  account existence through response timing even though the error message is
-  generic. Both are queued as the next hardening pass.
+  expires. No "log out all devices", no invalidation on password change.
+- **No password reset or change flow**, and no email verification.
 - **No audit log.** Nothing records who approved, rejected, or deleted what.
-- **Not all server actions validate input.** Several pass raw ids straight
-  through; the services re-check ownership, so this isn't an authorization hole,
-  but it is unvalidated input reaching the data layer.
-- **No security headers** (CSP, HSTS, `X-Frame-Options`) — `next.config.ts` is
-  still empty.
+- **No CSP.** The other headers are set, but a Content-Security-Policy needs
+  nonce plumbing through the Next rendering pipeline to avoid breaking inline
+  styles, which is a larger change than the rest of this pass.
+- **No checkout throttling.** The public checkout endpoint is bounded by input
+  caps (40 lines, quantity 50) but has no per-IP rate limit or duplicate-submit
+  dedupe, so a determined script could still fill the approval queue with junk.
+  The queue is owner-moderated, so this is spam rather than a breach — but it is
+  the next thing worth doing.
+- **No `User.isActive` flag.** The DAL re-reads the user on every secure check,
+  so a *deleted* account is caught immediately, but there is no way to suspend
+  one without deleting it.
 
 These are tracked and will be addressed in their own commits, with the same
-preference: enforce it where a mistake becomes impossible, not where it becomes
-merely detectable.
+preference throughout: enforce it where a mistake becomes impossible, not where
+it becomes merely detectable.
