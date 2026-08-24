@@ -225,7 +225,7 @@ Phase 7 (analytics) proper.
     was left for you to decide on rather than done unasked; SSR shell (`data-chart="revenue"`),
     types, and the Turbopack production build all confirm the Recharts wiring is correct.
 
-Checkout submission (cart→Order→schedule) is still Phase 5.
+Checkout submission (cart→Order→schedule) — DONE, see "Phase 5" below (2026-08-24).
 
 ## Storefront pilot-demo tweaks (2026-08-11)
 Hila saw the storefront pilot today; a few small follow-ups came out of that, all in
@@ -323,3 +323,94 @@ DB access straight from the terminal (no app involved):
 - `psql "$(grep DATABASE_URL .env | cut -d'"' -f2)"` — raw `psql` shell straight to the Neon DB,
   if you have `psql` installed locally (pulls the connection string out of `.env` so you don't have
   to paste the password).
+
+## Phase 5 — Customer checkout + production hardening ✅ (2026-08-24)
+Branch `feat/customer-checkout`. Goal was set by the user as: get the whole thing
+to a state where "if I put it on a server, it will work". Storefront visual design
+explicitly out of scope. Four commits, each verified (typecheck + lint + tests + build).
+
+**Security fix first (`73ae7bc`).** `assertCanAccessBusiness` compared only
+`businessId` and ignored `ctx.kind`, so a `storefront` context — scoped to the
+business whose slug is being viewed — satisfied the same guard as owner-only
+mutations (`setOrderStatus`, `rejectOrder`, `deleteProduct`, the stats reads).
+"Read-only" was a COMMENT on the type, not a control. Not exploitable at the time
+because no public write path existed; adding checkout is exactly what would have
+made it live, so it was fixed as its own commit first. Two layers:
+- Type: new `ManageContext = platform | business` (excludes storefront by
+  construction). `toTenantContext()` in `lib/dal.ts` now returns it, so a session
+  is the only source and owner-only services declaring `ctx: ManageContext` are
+  UNCALLABLE with a visitor context — a compile error, not a convention.
+- Runtime: `assertIsManager` (kind-only, called BEFORE the row lookup in the
+  id-only functions so they fail closed with no DB round-trip — this is also what
+  keeps their tests DB-free) and `assertCanManageBusiness` (kind + business).
+- `listProducts`/`listCategories` keep the wide `TenantContext` (the storefront
+  reads them) and so does `createOrder` — the one write a customer may reach.
+
+**`security.md` at the repo root (`71439bc`, updated `9a0405b`).** Written at the
+user's request — infosec is a stated interest. Documents the vulnerable state, why
+a latent bug is the dangerous kind (the trigger would have been a *feature*
+commit), the exact fix, 9 generalized RBAC takeaways, and an honest still-open list.
+
+**Checkout (`2920fbf`).** `/[slug]/checkout`. Loop closed: cart → PENDING order →
+the owner's EXISTING pending sidebar → approve → schedule. **No owner-side file
+changed.** Authority derived server-side at every step:
+- Business from the URL slug via new `resolveStorefront()` — now the ONLY place a
+  `StorefrontContext` is constructed. A SUSPENDED business returns null, closing
+  reads and new orders in one check.
+- **Status derived from `ctx.kind`** (storefront → PENDING, owner → OPEN) rather
+  than accepted as input, so no payload can skip the approval gate.
+- **Prices re-read from the DB.** New pure `modules/orders/pricing.ts`;
+  `buildOrderLines()` has NO price parameter, so a tampered localStorage cart has
+  nowhere to inject one. `PublicCheckoutInput` has no priceCents/businessId/status
+  keys and zod strips unknowns.
+- **`createOrder` rewritten**: product read moved INSIDE the transaction (it sat
+  outside — a read-then-write race where two checkouts could both see "1 left"),
+  sold-out/over-limit now refused via `InventoryUnavailableError`, LIMITED units
+  claimed with a conditional `updateMany` using `limitSoldCount` as an
+  optimistic-concurrency token. Owner path unchanged (`enforceInventory` defaults
+  false for her — she must still record an order for something already agreed).
+- UI: `CartProvider` moved OUT of each storefront template into a new
+  `app/[slug]/layout.tsx`, so the catalog and checkout routes share one cart (a
+  sibling route would otherwise render outside the provider and `useCart()` would
+  throw). Prop is now `slug`; localStorage key byte-identical so live carts survive.
+  `checkout-form.tsx` is shared, never forked per business. Sold-out result lists
+  the affected lines + one "fix my cart" button — never silently mutated.
+
+**Production hardening (`66ae8f2`).** New `LoginAttempt` table + migration
+`add_login_attempts`. Rate limit 5/email + 20/IP per 15 min, **Postgres-backed
+because serverless instances share no memory** (an in-memory Map would be theatre);
+checked before the bcrypt compare. Closed a **timing side channel** — the unknown-
+email path skipped `verifyPassword` entirely, so those responses were measurably
+faster and leaked which emails exist; now always compares against a dummy hash.
+Password capped at 200 chars (bcrypt hashes the whole input = cheap CPU DoS).
+Emails lowercased on login AND business creation (otherwise `Admin@x` vs `admin@x`
+= separate rate-limit budgets). Added `error.tsx`/`global-error.tsx`/`not-found.tsx`
+(none existed; the boundary shows only `error.digest`, never `error.message`, which
+can carry ids/table names). Security headers + `poweredByHeader: false` in
+`next.config.ts`. Remaining unvalidated actions now parse ids via new `lib/form.ts`.
+
+**Deploy fixes:** `build` is now `prisma generate && next build` (it only worked
+because `src/generated/` is committed, which goes stale — this actually bit during
+this work); added `db:deploy`; `.gitignore`'s `.env*` was swallowing `.env.example`
+so nobody cloning could learn the required vars — now committed and documents using
+Neon's **POOLED** endpoint on serverless; README rewritten from create-next-app
+boilerplate; `.github/workflows/ci.yml` runs typecheck + lint + tests.
+
+Two pre-existing lint errors would have failed CI — both false positives on
+deliberate patterns (registry dispatcher; SSR-safe localStorage hydration effect).
+Suppressed narrowly with the reasoning inline rather than reshaping working code.
+
+**Tests 26 → 77, still DB-free (~2s).** Separately verified against the real Neon
+DB (all rows cleaned up afterwards): PENDING status, snapshot pricing, presence in
+`listPendingOrders`, absence from `listOrdersInRange`, sold-out refusal leaving no
+orphan order row, owner path still OPEN, and the rate limiter locking out after 5
+failures then clearing on success. Production server (`npm start`) checked over
+HTTP: all 5 security headers present, custom Hebrew 404, and `/dashboard/*` +
+`/admin` all 307 → `/login` when unauthenticated.
+
+**NOT done / next:** not deployed yet (no Vercel project, no prod Neon DB, no live
+URL) — steps are in README "Deploying". No screenshots in the README. Repo root
+still carries `.agents/` (69 files, more than `src/`), `.windsurf/`, `todo.md`,
+`skills-lock.json`. Remaining security gaps are listed at the end of `security.md`
+(no RLS, no session revocation, no audit log, no CSP, no checkout throttling).
+Branch is NOT pushed and NOT merged to main.
